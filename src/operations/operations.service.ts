@@ -5,6 +5,7 @@ import * as path from 'path';
 import { OrdersService } from '../venndelo/orders/orders.service';
 import { ShippingService } from '../venndelo/shipping/shipping.service';
 import { GoogleDriveService } from '../google-drive/google-drive.service';
+import { ShipmentLogService, ShipmentLogRow } from '../shipment-log/shipment-log.service';
 import { StoresConfigService } from '../stores/stores-config.service';
 import { StoreConfig, StoreKey } from '../stores/store.types';
 import { LabelFormat, LabelOutput } from '../venndelo/shipping/shipping.dto';
@@ -65,6 +66,7 @@ export class OperationsService {
     private readonly shippingService: ShippingService,
     private readonly googleDriveService: GoogleDriveService,
     private readonly storesConfigService: StoresConfigService,
+    private readonly shipmentLogService: ShipmentLogService,
   ) {}
 
   // ── Proceso completo diario (todas las órdenes PENDING) ───────────────────
@@ -127,7 +129,7 @@ export class OperationsService {
     const carpetaNombre = this.folderName(now);
     const sheetNombre   = this.sheetName(now);
     this.logger.log('[4/7] Building CSV...');
-    const csvContent = this.buildCsv(orders, labelUrl, trackingByOrderId);
+    const csvContent = this.buildCsv(orders, labelUrl, trackingByOrderId, now);
     const csvLocalPath = path.join(os.tmpdir(), `${sheetNombre}.csv`);
     fs.writeFileSync(csvLocalPath, csvContent, 'utf-8');
     this.logger.log(`[4/7] CSV guardado localmente en: ${csvLocalPath}`);
@@ -160,6 +162,11 @@ export class OperationsService {
       pickupError = message;
       this.logger.warn(`[7/7] Pickup no procesado: ${message}`);
     }
+
+    // ── Log: guardar en BD las filas procesadas exitosamente ──────────────────
+    this.logger.log('[Log] Guardando log en BD...');
+    const logRows = this.buildLogRows(orders, labelUrl, trackingByOrderId, storeConfig.name);
+    await this.shipmentLogService.saveBatch(logRows);
 
     return {
       ordersProcessed: orders.length,
@@ -257,8 +264,10 @@ export class OperationsService {
     orders: Order[],
     labelUrl: string,
     trackingByOrderId: Map<string, string>,
+    date: Date,
   ): string {
-    const headers = ['pin', 'No Guia', 'name', 'sku', 'quantity', 'label_url'];
+    const fecha = this.isoDate(date);
+    const headers = ['pin', 'No Guia', 'name', 'sku', 'quantity', 'label_url', 'fecha'];
     const rows: string[][] = [headers];
 
     for (const order of orders) {
@@ -266,7 +275,7 @@ export class OperationsService {
       const lineItems = order.line_items ?? [];
 
       if (!lineItems.length) {
-        rows.push([this.csvCell(order.pin), this.csvCell(trackingNumber), '', '', '', this.csvCell(labelUrl)]);
+        rows.push([this.csvCell(order.pin), this.csvCell(trackingNumber), '', '', '', this.csvCell(labelUrl), fecha]);
         continue;
       }
 
@@ -278,11 +287,46 @@ export class OperationsService {
           this.csvCell(item.sku),
           String(item.quantity ?? ''),
           this.csvCell(labelUrl),
+          fecha,
         ]);
       }
     }
 
     return rows.map((r) => r.join(',')).join('\n');
+  }
+
+  // ── Log rows builder ──────────────────────────────────────────────────────
+
+  private buildLogRows(
+    orders: Order[],
+    labelUrl: string,
+    trackingByOrderId: Map<string, string>,
+    tienda: string,
+  ): ShipmentLogRow[] {
+    const rows: ShipmentLogRow[] = [];
+
+    for (const order of orders) {
+      const numeroGuia = trackingByOrderId.get(order.id) ?? '';
+      const lineItems = order.line_items ?? [];
+
+      if (!lineItems.length) {
+        rows.push({ pin: order.pin, numeroGuia, nombre: '', cantidad: 0, labelUrl, tienda });
+        continue;
+      }
+
+      for (const item of lineItems) {
+        rows.push({
+          pin: order.pin,
+          numeroGuia,
+          nombre: item.name ?? '',
+          cantidad: item.quantity ?? 0,
+          labelUrl,
+          tienda,
+        });
+      }
+    }
+
+    return rows;
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -310,6 +354,14 @@ export class OperationsService {
     const ampm = rawHour >= 12 ? 'pm' : 'am';
     const hour = rawHour % 12 || 12;
     return `VE-SB ${day} ${month} ${year}_${hour}:${minutes}${ampm}`;
+  }
+
+  /** "2026-04-07" */
+  private isoDate(date: Date): string {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
   }
 
   private sleep(ms: number): Promise<void> {

@@ -1,8 +1,10 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import * as Joi from 'joi';
+import databaseConfig from './config/database.config';
 import googleConfig from './config/google.config';
 import venndeloConfig from './config/venndelo.config';
+import { DatabaseModule } from './database/database.module';
 import { GoogleDriveModule } from './google-drive/google-drive.module';
 import { HealthController } from './health.controller';
 import { OperationsModule } from './operations/operations.module';
@@ -13,7 +15,7 @@ import { VenndeloModule } from './venndelo/venndelo.module';
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      load: [venndeloConfig, googleConfig],
+      load: [venndeloConfig, googleConfig, databaseConfig],
       validationSchema: Joi.object({
         NODE_ENV: Joi.string().valid('development', 'production', 'test').default('development'),
         PORT: Joi.number().default(3000),
@@ -36,8 +38,15 @@ import { VenndeloModule } from './venndelo/venndelo.module';
         GOOGLE_OAUTH_CLIENT_SECRET: Joi.string().optional(),
         GOOGLE_OAUTH_REFRESH_TOKEN: Joi.string().optional(),
         GOOGLE_DRIVE_ROOT_FOLDER_ID: Joi.string().allow('').optional(),
+        // PostgreSQL
+        DB_HOST: Joi.string().required(),
+        DB_PORT: Joi.number().default(5432),
+        DB_NAME: Joi.string().required(),
+        DB_USER: Joi.string().required(),
+        DB_PASSWORD: Joi.string().required(),
       }),
     }),
+    DatabaseModule,
     VenndeloModule,
     GoogleDriveModule,
     OperationsModule,
