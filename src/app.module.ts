@@ -7,6 +7,7 @@ import venndeloConfig from './config/venndelo.config';
 import { DatabaseModule } from './database/database.module';
 import { GoogleDriveModule } from './google-drive/google-drive.module';
 import { HealthController } from './health.controller';
+import { MailModule } from './mail/mail.module';
 import { OperationsModule } from './operations/operations.module';
 import { VenndeloModule } from './venndelo/venndelo.module';
 
@@ -38,6 +39,10 @@ import { VenndeloModule } from './venndelo/venndelo.module';
         GOOGLE_OAUTH_CLIENT_SECRET: Joi.string().optional(),
         GOOGLE_OAUTH_REFRESH_TOKEN: Joi.string().optional(),
         GOOGLE_DRIVE_ROOT_FOLDER_ID: Joi.string().allow('').optional(),
+        // Mail
+        MAIL_FROM: Joi.string().email().required(),
+        MAIL_TO: Joi.string().email().required(),
+        MAIL_APP_PASSWORD: Joi.string().required(),
         // PostgreSQL
         DB_HOST: Joi.string().required(),
         DB_PORT: Joi.number().default(5432),
@@ -47,6 +52,7 @@ import { VenndeloModule } from './venndelo/venndelo.module';
       }),
     }),
     DatabaseModule,
+    MailModule,
     VenndeloModule,
     GoogleDriveModule,
     OperationsModule,

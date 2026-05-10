@@ -6,6 +6,7 @@ import { OrdersService } from '../venndelo/orders/orders.service';
 import { ShippingService } from '../venndelo/shipping/shipping.service';
 import { GoogleDriveService } from '../google-drive/google-drive.service';
 import { ShipmentLogService, ShipmentLogRow } from '../shipment-log/shipment-log.service';
+import { MailService, StepReport } from '../mail/mail.service';
 import { StoresConfigService } from '../stores/stores-config.service';
 import { StoreConfig, StoreKey } from '../stores/store.types';
 import { LabelFormat, LabelOutput } from '../venndelo/shipping/shipping.dto';
@@ -37,7 +38,13 @@ interface OrdersResponse {
 
 interface LabelsResponse {
   status?: string;
-  data?: string; // URL del PDF — presente solo cuando status === 'SUCCESS'
+  data?: string;
+}
+
+interface DriveItem {
+  id?: string | null;
+  name?: string | null;
+  webViewLink?: string | null;
 }
 
 export interface ShipmentResult {
@@ -52,8 +59,8 @@ export interface ShipmentResult {
 }
 
 // ─── Polling config ───────────────────────────────────────────────────────────
-const POLL_INTERVAL_MS = 60_000; // 60 segundos entre intentos
-const POLL_MAX_ATTEMPTS = 30;    // máx 30 minutos de espera total
+const POLL_INTERVAL_MS = 60_000;
+const POLL_MAX_ATTEMPTS = 30;
 
 // ─── Service ──────────────────────────────────────────────────────────────────
 
@@ -67,6 +74,7 @@ export class OperationsService {
     private readonly googleDriveService: GoogleDriveService,
     private readonly storesConfigService: StoresConfigService,
     private readonly shipmentLogService: ShipmentLogService,
+    private readonly mailService: MailService,
   ) {}
 
   // ── Proceso completo diario (todas las órdenes PENDING) ───────────────────
@@ -109,83 +117,136 @@ export class OperationsService {
 
   private async processShipments(orders: Order[], storeConfig: StoreConfig): Promise<ShipmentResult> {
     const orderIds = orders.map((o) => o.id);
-
-    // ── Step 2: Create shipments ───────────────────────────────────────────
-    this.logger.log('[2/7] Creating shipments...');
-    const shipments = await this.shippingService.createShipments({ order_ids: orderIds }, storeConfig);
-    this.logger.log('[2/7] Shipments created');
-
-    // ── Step 3: Generate labels (con polling hasta SUCCESS) ────────────────
-    this.logger.log('[3/7] Generating labels...');
-    const { labelUrl, labelsRaw } = await this.pollGenerateLabels(orderIds, storeConfig);
-    this.logger.log(`[3/7] Labels URL: ${labelUrl}`);
-
-    // ── Step 3b: Polling del tracking number por orden ─────────────────────
-    this.logger.log('[3b] Fetching tracking numbers...');
-    const trackingByOrderId = await this.pollTrackingNumbers(orderIds, storeConfig);
-
-    // ── Step 4: Build CSV ──────────────────────────────────────────────────
     const now = new Date();
-    const carpetaNombre = this.folderName(now);
-    const sheetNombre   = this.sheetName(now);
-    this.logger.log('[4/7] Building CSV...');
-    const csvContent = this.buildCsv(orders, labelUrl, trackingByOrderId, now);
-    const csvLocalPath = path.join(os.tmpdir(), `${sheetNombre}.csv`);
-    fs.writeFileSync(csvLocalPath, csvContent, 'utf-8');
-    this.logger.log(`[4/7] CSV guardado localmente en: ${csvLocalPath}`);
+    const steps: StepReport[] = [];
 
-    // ── Step 5: Buscar carpeta del día o crearla si no existe ─────────────
-    this.logger.log(`[5/7] Buscando carpeta "${carpetaNombre}" en Drive...`);
-    let folder = await this.googleDriveService.findFolderByName(carpetaNombre, storeConfig.driveRootFolderId);
-    if (folder) {
-      this.logger.log(`[5/7] Carpeta existente reutilizada: "${carpetaNombre}" (${folder.id})`);
-    } else {
-      folder = await this.googleDriveService.createFolder(carpetaNombre, storeConfig.driveRootFolderId);
-      this.logger.log(`[5/7] Carpeta nueva creada: "${carpetaNombre}" (${folder.id})`);
-    }
+    // Paso 1 ya completado al entrar aquí
+    steps.push({
+      number: '1',
+      label: 'Órdenes obtenidas',
+      status: 'success',
+      detail: `${orders.length} orden(es) en PENDING`,
+    });
 
-    // ── Step 6: Upload CSV as Google Sheet ─────────────────────────────────
-    this.logger.log('[6/7] Uploading sheet to Drive...');
-    const csvBuffer = Buffer.from(csvContent, 'utf-8');
-    const sheet = await this.googleDriveService.uploadSheet(sheetNombre, csvBuffer, folder.id ?? undefined);
-    this.logger.log(`[6/7] Sheet uploaded: "${sheetNombre}" (${sheet.id})`);
-
-    // ── Step 7: Request pickup ─────────────────────────────────────────────
-    this.logger.log('[7/7] Requesting pickup...');
+    // Variables del resultado — declaradas antes del try para el return final
+    let shipments: unknown = null;
+    let labelsRaw: LabelsResponse = {};
+    let labelUrl = '';
+    let trackingByOrderId = new Map<string, string>();
+    let folder: DriveItem = { id: null, name: null, webViewLink: null };
+    let sheet: DriveItem = { id: null, name: null, webViewLink: null };
     let pickup: unknown = null;
     let pickupError: string | undefined;
+    let csvContent = '';
+    let carpetaNombre = '';
+    let sheetNombre = '';
+
     try {
-      pickup = await this.shippingService.requestPickup({ order_ids: orderIds }, storeConfig);
-      this.logger.log('[7/7] Pickup requested successfully');
+      // ── Step 2: Create shipments ─────────────────────────────────────────
+      this.logger.log('[2/7] Creating shipments...');
+      shipments = await this.shippingService.createShipments({ order_ids: orderIds }, storeConfig);
+      steps.push({ number: '2', label: 'Envíos creados', status: 'success', detail: 'OK' });
+      this.logger.log('[2/7] Shipments created');
+
+      // ── Step 3: Generate labels ──────────────────────────────────────────
+      this.logger.log('[3/7] Generating labels...');
+      const labelsResult = await this.pollGenerateLabels(orderIds, storeConfig);
+      labelUrl  = labelsResult.labelUrl;
+      labelsRaw = labelsResult.labelsRaw;
+      steps.push({ number: '3', label: 'Etiquetas generadas', status: 'success', detail: 'URL obtenida' });
+      this.logger.log(`[3/7] Labels URL: ${labelUrl}`);
+
+      // ── Step 3b: Tracking numbers ────────────────────────────────────────
+      this.logger.log('[3b] Fetching tracking numbers...');
+      trackingByOrderId = await this.pollTrackingNumbers(orderIds, storeConfig);
+      const trackingOk = [...trackingByOrderId.values()].filter(Boolean).length;
+      steps.push({ number: '3b', label: 'Tracking numbers', status: 'success', detail: `${trackingOk}/${orderIds.length} obtenidos` });
+
+      // ── Step 4: Build CSV ────────────────────────────────────────────────
+      carpetaNombre = this.folderName(now);
+      sheetNombre   = this.sheetName(now);
+      this.logger.log('[4/7] Building CSV...');
+      csvContent = this.buildCsv(orders, labelUrl, trackingByOrderId, now);
+      const csvLocalPath = path.join(os.tmpdir(), `${sheetNombre}.csv`);
+      fs.writeFileSync(csvLocalPath, csvContent, 'utf-8');
+      steps.push({ number: '4', label: 'CSV generado', status: 'success', detail: `${orders.length} fila(s)` });
+      this.logger.log(`[4/7] CSV guardado localmente en: ${csvLocalPath}`);
+
+      // ── Step 5: Buscar o crear carpeta Drive ─────────────────────────────
+      this.logger.log(`[5/7] Buscando carpeta "${carpetaNombre}" en Drive...`);
+      let folderResult = await this.googleDriveService.findFolderByName(carpetaNombre, storeConfig.driveRootFolderId);
+      if (folderResult) {
+        this.logger.log(`[5/7] Carpeta existente reutilizada: "${carpetaNombre}" (${folderResult.id})`);
+      } else {
+        folderResult = await this.googleDriveService.createFolder(carpetaNombre, storeConfig.driveRootFolderId);
+        this.logger.log(`[5/7] Carpeta nueva creada: "${carpetaNombre}" (${folderResult.id})`);
+      }
+      folder = folderResult;
+      steps.push({ number: '5', label: 'Carpeta Drive', status: 'success', detail: `"${carpetaNombre}"` });
+
+      // ── Step 6: Upload Google Sheet ──────────────────────────────────────
+      this.logger.log('[6/7] Uploading sheet to Drive...');
+      const csvBuffer = Buffer.from(csvContent, 'utf-8');
+      const sheetResult = await this.googleDriveService.uploadSheet(sheetNombre, csvBuffer, folder.id ?? undefined);
+      sheet = sheetResult;
+      steps.push({ number: '6', label: 'Sheet subido a Drive', status: 'success', detail: sheetNombre });
+      this.logger.log(`[6/7] Sheet uploaded: "${sheetNombre}" (${sheet.id})`);
+
+      // ── Step 7: Request pickup ───────────────────────────────────────────
+      this.logger.log('[7/7] Requesting pickup...');
+      try {
+        pickup = await this.shippingService.requestPickup({ order_ids: orderIds }, storeConfig);
+        steps.push({ number: '7', label: 'Pickup solicitado', status: 'success', detail: 'OK' });
+        this.logger.log('[7/7] Pickup requested successfully');
+      } catch (err: unknown) {
+        const message = (err as { message?: string })?.message ?? 'Error al solicitar pickup';
+        pickupError = message;
+        steps.push({ number: '7', label: 'Pickup solicitado', status: 'error', detail: message });
+        this.logger.warn(`[7/7] Pickup no procesado: ${message}`);
+      }
+
+      // ── Log BD ───────────────────────────────────────────────────────────
+      this.logger.log('[Log] Guardando log en BD...');
+      const logRows = this.buildLogRows(orders, labelUrl, trackingByOrderId, storeConfig.name);
+      await this.shipmentLogService.saveBatch(logRows);
+
+      // ── Email de reporte (éxito) ─────────────────────────────────────────
+      await this.mailService.sendShipmentReport({
+        store: storeConfig.name,
+        date: now,
+        steps,
+        ordersProcessed: orders.length,
+        sheetLink: sheet.webViewLink ?? undefined,
+        overallSuccess: true,
+      });
+
+      return {
+        ordersProcessed: orders.length,
+        orderIds,
+        driveFolder: { id: folder.id ?? null, name: folder.name ?? null, webViewLink: folder.webViewLink ?? null },
+        driveSheet:  { id: sheet.id ?? null,  name: sheet.name ?? null,  webViewLink: sheet.webViewLink ?? null },
+        shipments,
+        labels: labelsRaw,
+        pickup,
+        ...(pickupError && { pickupError }),
+      };
+
     } catch (err: unknown) {
-      const message = (err as { message?: string })?.message ?? 'Error al solicitar pickup';
-      pickupError = message;
-      this.logger.warn(`[7/7] Pickup no procesado: ${message}`);
+      const message = (err as { message?: string })?.message ?? 'Error desconocido';
+      this.logger.error(`[Process] Error en el proceso: ${message}`);
+
+      // ── Email de reporte (fallo) ─────────────────────────────────────────
+      await this.mailService.sendShipmentReport({
+        store: storeConfig.name,
+        date: now,
+        steps,
+        ordersProcessed: 0,
+        overallSuccess: false,
+        errorMessage: message,
+      });
+
+      throw err;
     }
-
-    // ── Log: guardar en BD las filas procesadas exitosamente ──────────────────
-    this.logger.log('[Log] Guardando log en BD...');
-    const logRows = this.buildLogRows(orders, labelUrl, trackingByOrderId, storeConfig.name);
-    await this.shipmentLogService.saveBatch(logRows);
-
-    return {
-      ordersProcessed: orders.length,
-      orderIds,
-      driveFolder: {
-        id: folder.id ?? null,
-        name: folder.name ?? null,
-        webViewLink: folder.webViewLink ?? null,
-      },
-      driveSheet: {
-        id: sheet.id ?? null,
-        name: sheet.name ?? null,
-        webViewLink: sheet.webViewLink ?? null,
-      },
-      shipments,
-      labels: labelsRaw,
-      pickup,
-      ...(pickupError && { pickupError }),
-    };
   }
 
   // ── Polling: generateLabels hasta SUCCESS ─────────────────────────────────
@@ -197,7 +258,7 @@ export class OperationsService {
     for (let attempt = 1; attempt <= POLL_MAX_ATTEMPTS; attempt++) {
       const labelsRaw = await this.shippingService.generateLabels(
         { output: LabelOutput.URL, format: LabelFormat.LABEL_10x15, order_ids: orderIds },
-        90_000, // 90s — generate-labels puede tardar más que el timeout global
+        90_000,
         storeConfig,
       ) as LabelsResponse;
 
@@ -336,27 +397,18 @@ export class OperationsService {
     'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre',
   ];
 
-  /** "Guías 10 Abril 2026" */
   private folderName(date: Date): string {
-    const day = date.getDate();
-    const month = this.MESES_ES[date.getMonth()];
-    const year = date.getFullYear();
-    return `Guías ${day} ${month} ${year}`;
+    return `Guías ${date.getDate()} ${this.MESES_ES[date.getMonth()]} ${date.getFullYear()}`;
   }
 
-  /** "VE-SB 10 Abril 2026_5:00pm" */
   private sheetName(date: Date): string {
-    const day = date.getDate();
-    const month = this.MESES_ES[date.getMonth()];
-    const year = date.getFullYear();
     const rawHour = date.getHours();
     const minutes = String(date.getMinutes()).padStart(2, '0');
     const ampm = rawHour >= 12 ? 'pm' : 'am';
     const hour = rawHour % 12 || 12;
-    return `VE-SB ${day} ${month} ${year}_${hour}:${minutes}${ampm}`;
+    return `VE-SB ${date.getDate()} ${this.MESES_ES[date.getMonth()]} ${date.getFullYear()}_${hour}:${minutes}${ampm}`;
   }
 
-  /** "2026-04-07" */
   private isoDate(date: Date): string {
     const y = date.getFullYear();
     const m = String(date.getMonth() + 1).padStart(2, '0');
