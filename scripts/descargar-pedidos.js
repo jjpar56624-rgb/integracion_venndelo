@@ -164,7 +164,7 @@ async function descargarPedidos(tienda, tmpDir) {
 
 /** Login en Venndelo y retorna el JWT del localStorage. */
 async function obtenerJWT(email, password) {
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless: true, channel: 'chrome' });
   const page = await browser.newPage();
   try {
     await page.goto('https://app.venndelo.com/web/#/login', { waitUntil: 'networkidle' });
