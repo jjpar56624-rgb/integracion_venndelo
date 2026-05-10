@@ -1,13 +1,11 @@
+import { HttpService } from '@nestjs/axios';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { drive_v3, google, sheets_v4 } from 'googleapis';
 import * as ExcelJS from 'exceljs';
 import { chromium } from 'playwright';
-import axios from 'axios';
+import { firstValueFrom } from 'rxjs';
 import { Readable } from 'stream';
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
 
 interface TiendaConfig {
   nombre: string;
@@ -18,8 +16,8 @@ interface TiendaConfig {
 
 interface ArchivoProcessado {
   tienda: string;
-  xlsxPath: string;
-  tmpDir: string;
+  buffer: Buffer;
+  nombre: string;
 }
 
 export interface ResultadoTienda {
@@ -34,14 +32,13 @@ export interface ResultadoDescarga {
   duracion: string;
 }
 
-// Índices de columna (1-based): A=1, G=7, I=9
 const EXCEL = {
   hojaItems: 'Items',
   hojaDetalle: 'Detalle de ordenes',
-  colPinItems: 1,
-  colUnidades: 7,
-  colPinDetalle: 1,
-  colTotalItems: 9,
+  colPinItems: 1,   // col A
+  colUnidades: 7,   // col G
+  colPinDetalle: 1, // col A
+  colTotalItems: 9, // col I
 };
 
 @Injectable()
@@ -50,7 +47,10 @@ export class DescargaPedidosService implements OnModuleInit {
   private drive: drive_v3.Drive;
   private sheets: sheets_v4.Sheets;
 
-  constructor(private readonly configService: ConfigService) {}
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly httpService: HttpService,
+  ) {}
 
   onModuleInit() {
     const auth = this.buildGoogleAuth([
@@ -74,26 +74,20 @@ export class DescargaPedidosService implements OnModuleInit {
 
     for (const tienda of tiendas) {
       this.logger.log(`── Tienda: ${tienda.nombre}`);
-      const tmpDir = fs.mkdtempSync(
-        path.join(os.tmpdir(), `pedidos-${tienda.nombre.toLowerCase()}-`),
-      );
-
       try {
-        const xlsxPath = await this.descargarPedidos(tienda, tmpDir);
-        const procesadoPath = await this.procesarExcel(xlsxPath, tienda, tmpDir);
-        const enlace = await this.subirADrive(procesadoPath, tienda.driveFolderId);
+        const rawBuffer = await this.descargarPedidos(tienda);
+        const { buffer, nombre } = await this.procesarExcel(rawBuffer, tienda);
+        const enlace = await this.subirADrive(buffer, nombre, tienda.driveFolderId);
 
         this.logger.log(`✔ ${tienda.nombre} subido: ${enlace}`);
-        archivosProcessados.push({ tienda: tienda.nombre, xlsxPath: procesadoPath, tmpDir });
+        archivosProcessados.push({ tienda: tienda.nombre, buffer, nombre });
         resultados.push({ tienda: tienda.nombre, ok: true, enlace });
       } catch (err) {
         this.logger.error(`✘ ${tienda.nombre}: ${err.message}`);
         resultados.push({ tienda: tienda.nombre, ok: false, error: err.message });
-        fs.rmSync(tmpDir, { recursive: true, force: true });
       }
     }
 
-    // Consolidar ambas tiendas en el Sheets único
     if (archivosProcessados.length > 0) {
       try {
         const enlace = await this.consolidarEnSheets(archivosProcessados);
@@ -102,10 +96,6 @@ export class DescargaPedidosService implements OnModuleInit {
       } catch (err) {
         this.logger.error(`✘ Consolidado: ${err.message}`);
         resultados.push({ tienda: 'Consolidado', ok: false, error: err.message });
-      } finally {
-        for (const { tmpDir } of archivosProcessados) {
-          fs.rmSync(tmpDir, { recursive: true, force: true });
-        }
       }
     }
 
@@ -114,31 +104,33 @@ export class DescargaPedidosService implements OnModuleInit {
     return { resultados, duracion };
   }
 
-  // ─── Paso 1: login → JWT → API export → descarga xlsx ────────────────────
+  // ─── Paso 1: login → JWT → API export → Buffer ────────────────────────────
 
-  private async descargarPedidos(tienda: TiendaConfig, tmpDir: string): Promise<string> {
+  private async descargarPedidos(tienda: TiendaConfig): Promise<Buffer> {
     const jwt = await this.obtenerJWT(tienda.webEmail, tienda.webPassword);
     this.logger.log(`  · JWT obtenido (${tienda.nombre})`);
 
     const hoy = this.isoFecha(new Date());
     const startAt = this.configService.get<string>('descargaPedidos.startAt', '2025-11-01');
 
-    const exportRes = await axios.post(
-      'https://app.venndelo.com/v2/admin/rpc',
-      {
-        jsonrpc: '2.0',
-        id: -1,
-        method: 'Admin_Order_Export.export',
-        params: { start_at: startAt, end_at: hoy },
-      },
-      {
-        params: { s: 'default', m: 'Admin_Order_Export.export' },
-        headers: {
-          'x-venndelo-admin-token': jwt,
-          'Content-Type': 'application/json;charset=UTF-8',
-          Accept: 'application/json, text/plain, */*',
+    const exportRes = await firstValueFrom(
+      this.httpService.post(
+        'https://app.venndelo.com/v2/admin/rpc',
+        {
+          jsonrpc: '2.0',
+          id: -1,
+          method: 'Admin_Order_Export.export',
+          params: { start_at: startAt, end_at: hoy },
         },
-      },
+        {
+          params: { s: 'default', m: 'Admin_Order_Export.export' },
+          headers: {
+            'x-venndelo-admin-token': jwt,
+            'Content-Type': 'application/json;charset=UTF-8',
+            Accept: 'application/json, text/plain, */*',
+          },
+        },
+      ),
     );
 
     if (exportRes.data?.error) {
@@ -148,19 +140,16 @@ export class DescargaPedidosService implements OnModuleInit {
     const downloadUrl: string = exportRes.data?.result?.url;
     if (!downloadUrl) throw new Error(`Sin URL de descarga para ${tienda.nombre}`);
 
-    const fileRes = await axios.get(downloadUrl, { responseType: 'arraybuffer' });
-    const destino = path.join(tmpDir, `pedidos_${tienda.nombre}_${hoy}.xlsx`);
-    fs.writeFileSync(destino, Buffer.from(fileRes.data));
+    const fileRes = await firstValueFrom(
+      this.httpService.get<ArrayBuffer>(downloadUrl, { responseType: 'arraybuffer' }),
+    );
 
     this.logger.log(`  · Rango: ${startAt} → ${hoy} (${tienda.nombre})`);
-    return destino;
+    return Buffer.from(fileRes.data);
   }
 
   private async obtenerJWT(email: string, password: string): Promise<string> {
-    const browser = await chromium.launch({
-      headless: true,
-      channel: 'chrome', // usa el Chrome instalado en el sistema
-    });
+    const browser = await chromium.launch({ headless: true, channel: 'chrome' });
     const page = await browser.newPage();
     try {
       await page.goto('https://app.venndelo.com/web/#/login', { waitUntil: 'networkidle' });
@@ -179,15 +168,14 @@ export class DescargaPedidosService implements OnModuleInit {
     }
   }
 
-  // ─── Paso 2: calcular Total Items por PIN y escribir en Detalle ───────────
+  // ─── Paso 2: procesar Excel en memoria ───────────────────────────────────
 
   private async procesarExcel(
-    xlsxPath: string,
+    buffer: Buffer,
     tienda: TiendaConfig,
-    tmpDir: string,
-  ): Promise<string> {
+  ): Promise<{ buffer: Buffer; nombre: string }> {
     const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.readFile(xlsxPath);
+    await workbook.xlsx.load(buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer);
 
     const hojaItems = workbook.getWorksheet(EXCEL.hojaItems);
     if (!hojaItems) throw new Error(`Hoja "${EXCEL.hojaItems}" no encontrada (${tienda.nombre})`);
@@ -217,18 +205,17 @@ export class DescargaPedidosService implements OnModuleInit {
     this.logger.log(`  · ${tienda.nombre}: ${actualizadas} filas actualizadas`);
 
     const hoy = this.isoFecha(new Date());
-    const destino = path.join(tmpDir, `pedidos_${tienda.nombre}_procesado_${hoy}.xlsx`);
-    await workbook.xlsx.writeFile(destino);
-    return destino;
+    const nombre = `pedidos_${tienda.nombre}_procesado_${hoy}.xlsx`;
+    const processedBuffer = await workbook.xlsx.writeBuffer();
+    return { buffer: Buffer.from(processedBuffer), nombre };
   }
 
   // ─── Paso 3: subir xlsx a Google Drive ───────────────────────────────────
 
-  private async subirADrive(filePath: string, folderId: string): Promise<string> {
-    const buffer = fs.readFileSync(filePath);
+  private async subirADrive(buffer: Buffer, nombre: string, folderId: string): Promise<string> {
     const response = await this.drive.files.create({
       requestBody: {
-        name: path.basename(filePath),
+        name: nombre,
         mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         ...(folderId && { parents: [folderId] }),
       },
@@ -242,7 +229,7 @@ export class DescargaPedidosService implements OnModuleInit {
     return response.data.webViewLink ?? '';
   }
 
-  // ─── Paso 4: consolidar hojas "Detalle de ordenes" en Sheets único ────────
+  // ─── Paso 4: consolidar en Google Sheets ─────────────────────────────────
 
   private async consolidarEnSheets(archivos: ArchivoProcessado[]): Promise<string> {
     const fileId = this.configService.getOrThrow<string>('descargaPedidos.consolidadoFileId');
@@ -255,8 +242,8 @@ export class DescargaPedidosService implements OnModuleInit {
 
     const todasLasFilas: (string | number)[][] = [];
     for (let i = 0; i < archivos.length; i++) {
-      const filas = await this.leerDetalleComoArray(archivos[i].xlsxPath);
-      const data = i > 0 ? filas.slice(1) : filas; // solo primera tienda lleva encabezado
+      const filas = await this.leerDetalleComoArray(archivos[i].buffer);
+      const data = i > 0 ? filas.slice(1) : filas;
       todasLasFilas.push(...data);
       this.logger.log(`  · ${archivos[i].tienda}: ${data.length} filas`);
     }
@@ -277,12 +264,12 @@ export class DescargaPedidosService implements OnModuleInit {
     return `https://docs.google.com/spreadsheets/d/${fileId}/edit`;
   }
 
-  private async leerDetalleComoArray(xlsxPath: string): Promise<(string | number)[][]> {
+  private async leerDetalleComoArray(buffer: Buffer): Promise<(string | number)[][]> {
     const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.readFile(xlsxPath);
+    await workbook.xlsx.load(buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer);
 
     const hoja = workbook.getWorksheet(EXCEL.hojaDetalle);
-    if (!hoja) throw new Error(`Hoja "${EXCEL.hojaDetalle}" no encontrada en ${path.basename(xlsxPath)}`);
+    if (!hoja) throw new Error(`Hoja "${EXCEL.hojaDetalle}" no encontrada en el buffer`);
 
     const filas: (string | number)[][] = [];
     hoja.eachRow(row => {
