@@ -2,9 +2,11 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import * as Joi from 'joi';
 import databaseConfig from './config/database.config';
+import descargaPedidosConfig from './config/descarga-pedidos.config';
 import googleConfig from './config/google.config';
 import venndeloConfig from './config/venndelo.config';
 import { DatabaseModule } from './database/database.module';
+import { DescargaPedidosModule } from './descarga-pedidos/descarga-pedidos.module';
 import { GoogleDriveModule } from './google-drive/google-drive.module';
 import { HealthController } from './health.controller';
 import { MailModule } from './mail/mail.module';
@@ -16,7 +18,7 @@ import { VenndeloModule } from './venndelo/venndelo.module';
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      load: [venndeloConfig, googleConfig, databaseConfig],
+      load: [venndeloConfig, googleConfig, databaseConfig, descargaPedidosConfig],
       validationSchema: Joi.object({
         NODE_ENV: Joi.string().valid('development', 'production', 'test').default('development'),
         PORT: Joi.number().default(3000),
@@ -31,6 +33,12 @@ import { VenndeloModule } from './venndelo/venndelo.module';
         VENNDELO_CALI_API_KEY: Joi.string().required(),
         VENNDELO_CALI_STORE_ID: Joi.string().required(),
         VENNDELO_CALI_DRIVE_FOLDER_ID: Joi.string().allow('').optional(),
+        // Descarga automática de pedidos
+        VENNDELO_CALI_WEB_EMAIL: Joi.string().email().optional(),
+        VENNDELO_CALI_WEB_PASSWORD: Joi.string().optional(),
+        VENNDELO_BOGOTA_WEB_EMAIL: Joi.string().email().optional(),
+        VENNDELO_BOGOTA_WEB_PASSWORD: Joi.string().optional(),
+        CONSOLIDADO_FILE_ID: Joi.string().optional(),
         // Google Drive - Service Account (legado)
         GOOGLE_CLIENT_EMAIL: Joi.string().email().optional(),
         GOOGLE_PRIVATE_KEY: Joi.string().optional(),
@@ -56,6 +64,7 @@ import { VenndeloModule } from './venndelo/venndelo.module';
     VenndeloModule,
     GoogleDriveModule,
     OperationsModule,
+    DescargaPedidosModule,
   ],
 })
 export class AppModule {}
