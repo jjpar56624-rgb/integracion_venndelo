@@ -7,8 +7,13 @@ import {
   ProcessReport,
   StepReport,
 } from './templates/shipment-report.template';
+import {
+  buildDescargaHtml,
+  buildDescargaSubject,
+  DescargaPedidosReport,
+} from './templates/descarga-pedidos-report.template';
 
-export { ProcessReport, StepReport };
+export { ProcessReport, StepReport, DescargaPedidosReport };
 
 @Injectable()
 export class MailService {
@@ -50,6 +55,22 @@ export class MailService {
     } catch (err) {
       this.logger.error(`[Mail] Error enviando reporte: ${(err as Error).message}`);
       // No re-lanzamos — el fallo de email no debe abortar el proceso principal
+    }
+  }
+
+  // ── Envía el reporte de descarga de pedidos ──────────────────────────────
+
+  async sendDescargaPedidosReport(report: DescargaPedidosReport): Promise<void> {
+    try {
+      await this.createTransporter().sendMail({
+        from: `"Venndelo Backend" <${this.mailFrom}>`,
+        to: this.mailTo,
+        subject: buildDescargaSubject(report),
+        html: buildDescargaHtml(report),
+      });
+      this.logger.log(`[Mail] Reporte descarga pedidos enviado a ${this.mailTo}`);
+    } catch (err) {
+      this.logger.error(`[Mail] Error enviando reporte descarga: ${(err as Error).message}`);
     }
   }
 

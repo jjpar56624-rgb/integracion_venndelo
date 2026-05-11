@@ -1,6 +1,7 @@
 import { HttpService } from '@nestjs/axios';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { MailService } from '../mail/mail.service';
 import { drive_v3, google, sheets_v4 } from 'googleapis';
 import * as ExcelJS from 'exceljs';
 import { chromium } from 'playwright';
@@ -50,6 +51,7 @@ export class DescargaPedidosService implements OnModuleInit {
   constructor(
     private readonly configService: ConfigService,
     private readonly httpService: HttpService,
+    private readonly mailService: MailService,
   ) {}
 
   onModuleInit() {
@@ -101,6 +103,9 @@ export class DescargaPedidosService implements OnModuleInit {
 
     const duracion = `${((Date.now() - inicio) / 1000).toFixed(1)}s`;
     this.logger.log(`✅ Proceso completado en ${duracion}`);
+
+    await this.mailService.sendDescargaPedidosReport({ date: new Date(), resultados, duracion });
+
     return { resultados, duracion };
   }
 
