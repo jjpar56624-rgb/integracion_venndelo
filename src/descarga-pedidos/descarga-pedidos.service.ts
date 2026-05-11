@@ -149,7 +149,7 @@ export class DescargaPedidosService implements OnModuleInit {
   }
 
   private async obtenerJWT(email: string, password: string): Promise<string> {
-    const browser = await chromium.launch({ headless: true, channel: 'chrome' });
+    const browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
     try {
       await page.goto('https://app.venndelo.com/web/#/login', { waitUntil: 'networkidle' });

@@ -15,14 +15,22 @@ RUN npm run build
 RUN npm ci --omit=dev && npm cache clean --force
 
 # ─── Stage 2: Production ─────────────────────────────────────────────────────
-FROM node:20-alpine AS production
+FROM node:20-slim AS production
 
 ENV NODE_ENV=production
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 WORKDIR /app
 
+# Install Playwright Chromium + its system dependencies
+RUN npx -y playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
+
 # Create non-root user
-RUN addgroup -g 1001 -S nodejs && adduser -S nestjs -u 1001
+RUN groupadd -g 1001 nodejs && useradd -u 1001 -g nodejs nestjs
+
+# Ensure playwright browser dir is accessible by non-root user
+RUN chmod -R 755 /ms-playwright
 
 COPY --from=builder --chown=nestjs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nestjs:nodejs /app/dist ./dist
