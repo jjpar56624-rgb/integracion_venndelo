@@ -112,67 +112,105 @@ export class DescargaPedidosService implements OnModuleInit {
   // ─── Paso 1: login → JWT → API export → Buffer ────────────────────────────
 
   private async descargarPedidos(tienda: TiendaConfig): Promise<Buffer> {
+    this.logger.log(`  · [${tienda.nombre}] Iniciando login con ${tienda.webEmail}`);
     const jwt = await this.obtenerJWT(tienda.webEmail, tienda.webPassword);
-    this.logger.log(`  · JWT obtenido (${tienda.nombre})`);
+
+    if (!jwt) throw new Error(`JWT vacío para ${tienda.nombre} — login fallido`);
+    this.logger.log(`  · [${tienda.nombre}] JWT obtenido (${jwt.length} chars)`);
 
     const hoy = this.isoFecha(new Date());
     const startAt = this.configService.get<string>('descargaPedidos.startAt', '2025-11-01');
+    this.logger.log(`  · [${tienda.nombre}] Llamando API export: ${startAt} → ${hoy}`);
 
-    const exportRes = await firstValueFrom(
-      this.httpService.post(
-        'https://app.venndelo.com/v2/admin/rpc',
-        {
-          jsonrpc: '2.0',
-          id: -1,
-          method: 'Admin_Order_Export.export',
-          params: { start_at: startAt, end_at: hoy },
-        },
-        {
-          params: { s: 'default', m: 'Admin_Order_Export.export' },
-          headers: {
-            'x-venndelo-admin-token': jwt,
-            'Content-Type': 'application/json;charset=UTF-8',
-            Accept: 'application/json, text/plain, */*',
+    let exportRes: any;
+    try {
+      exportRes = await firstValueFrom(
+        this.httpService.post(
+          'https://app.venndelo.com/v2/admin/rpc',
+          {
+            jsonrpc: '2.0',
+            id: -1,
+            method: 'Admin_Order_Export.export',
+            params: { start_at: startAt, end_at: hoy },
           },
-        },
-      ),
-    );
+          {
+            params: { s: 'default', m: 'Admin_Order_Export.export' },
+            headers: {
+              'x-venndelo-admin-token': jwt,
+              'Content-Type': 'application/json;charset=UTF-8',
+              Accept: 'application/json, text/plain, */*',
+            },
+          },
+        ),
+      );
+    } catch (httpErr: any) {
+      const status = httpErr?.response?.status ?? 'sin respuesta';
+      const body = JSON.stringify(httpErr?.response?.data ?? {}).slice(0, 300);
+      this.logger.error(`  · [${tienda.nombre}] HTTP error en export: status=${status} body=${body}`);
+      throw new Error(`API export falló con status ${status} (${tienda.nombre})`);
+    }
+
+    this.logger.log(`  · [${tienda.nombre}] Respuesta export HTTP 200 — analizando resultado`);
 
     if (exportRes.data?.error) {
-      throw new Error(`API export (${tienda.nombre}): ${exportRes.data.error.message}`);
+      const msg = exportRes.data.error.message ?? JSON.stringify(exportRes.data.error);
+      this.logger.error(`  · [${tienda.nombre}] Error JSON-RPC: ${msg}`);
+      throw new Error(`API export (${tienda.nombre}): ${msg}`);
     }
 
     const downloadUrl: string = exportRes.data?.result?.url;
-    if (!downloadUrl) throw new Error(`Sin URL de descarga para ${tienda.nombre}`);
+    if (!downloadUrl) {
+      this.logger.error(`  · [${tienda.nombre}] Respuesta sin URL: ${JSON.stringify(exportRes.data).slice(0, 300)}`);
+      throw new Error(`Sin URL de descarga para ${tienda.nombre}`);
+    }
 
-    const fileRes = await firstValueFrom(
-      this.httpService.get<ArrayBuffer>(downloadUrl, { responseType: 'arraybuffer' }),
-    );
+    this.logger.log(`  · [${tienda.nombre}] URL de descarga obtenida — descargando archivo`);
 
-    this.logger.log(`  · Rango: ${startAt} → ${hoy} (${tienda.nombre})`);
+    let fileRes: any;
+    try {
+      fileRes = await firstValueFrom(
+        this.httpService.get<ArrayBuffer>(downloadUrl, { responseType: 'arraybuffer' }),
+      );
+    } catch (httpErr: any) {
+      const status = httpErr?.response?.status ?? 'sin respuesta';
+      this.logger.error(`  · [${tienda.nombre}] Error descargando archivo: status=${status}`);
+      throw new Error(`Descarga del archivo falló con status ${status} (${tienda.nombre})`);
+    }
+
+    const bytes = (fileRes.data as ArrayBuffer)?.byteLength ?? 0;
+    this.logger.log(`  · [${tienda.nombre}] Archivo descargado: ${(bytes / 1024).toFixed(1)} KB`);
     return Buffer.from(fileRes.data);
   }
 
   private async obtenerJWT(email: string, password: string): Promise<string> {
+    this.logger.log(`  · [Login] Lanzando Chromium (platform=${process.platform})`);
     const browser = await chromium.launch({
       headless: true,
       ...(process.platform === 'win32' && { channel: 'chrome' }),
     });
     const page = await browser.newPage();
     try {
+      this.logger.log(`  · [Login] Navegando a login`);
       await page.goto('https://app.venndelo.com/web/#/login', { waitUntil: 'networkidle' });
+      this.logger.log(`  · [Login] Página cargada — llenando credenciales`);
       await page.fill('input[placeholder="Correo Electrónico"]', email);
       await page.fill('input[type="password"]', password);
+      this.logger.log(`  · [Login] Haciendo clic en Ingresar`);
       await page.click('button.x-button-ingresar');
+      this.logger.log(`  · [Login] Esperando redirección post-login`);
       await page.waitForFunction(
         () => !window.location.hash.includes('/login'),
         { timeout: 30000 },
       );
       await page.waitForLoadState('networkidle');
+      this.logger.log(`  · [Login] Redireccionado — extrayendo token de localStorage`);
       const raw: string | null = await page.evaluate(() => localStorage.getItem('token'));
-      return raw ? (JSON.parse(raw) as string) : '';
+      const token = raw ? (JSON.parse(raw) as string) : '';
+      this.logger.log(`  · [Login] Token ${token ? 'encontrado' : 'NO encontrado en localStorage'}`);
+      return token;
     } finally {
       await browser.close();
+      this.logger.log(`  · [Login] Browser cerrado`);
     }
   }
 
