@@ -164,7 +164,8 @@ export class DescargaPedidosService implements OnModuleInit {
       throw new Error(`Sin URL de descarga para ${tienda.nombre}`);
     }
 
-    this.logger.log(`  · [${tienda.nombre}] URL de descarga obtenida — descargando archivo`);
+    this.logger.log(`  · [${tienda.nombre}] URL de descarga obtenida: ${downloadUrl.slice(0, 120)}...`);
+    this.logger.log(`  · [${tienda.nombre}] Descargando archivo...`);
 
     let fileRes: any;
     try {
@@ -172,8 +173,22 @@ export class DescargaPedidosService implements OnModuleInit {
         this.httpService.get<ArrayBuffer>(downloadUrl, { responseType: 'arraybuffer' }),
       );
     } catch (httpErr: any) {
-      const status = httpErr?.response?.status ?? 'sin respuesta';
-      this.logger.error(`  · [${tienda.nombre}] Error descargando archivo: status=${status}`);
+      const status   = httpErr?.response?.status                                      ?? 'sin respuesta';
+      const headers  = JSON.stringify(httpErr?.response?.headers ?? {}).slice(0, 500);
+      const rawBody  = httpErr?.response?.data;
+      let   body     = '';
+      if (rawBody instanceof ArrayBuffer || Buffer.isBuffer(rawBody)) {
+        body = Buffer.from(rawBody).toString('utf8').slice(0, 500);
+      } else if (typeof rawBody === 'string') {
+        body = rawBody.slice(0, 500);
+      } else if (rawBody) {
+        body = JSON.stringify(rawBody).slice(0, 500);
+      }
+      this.logger.error(`  · [${tienda.nombre}] Error descargando archivo`);
+      this.logger.error(`    status  : ${status}`);
+      this.logger.error(`    headers : ${headers}`);
+      this.logger.error(`    body    : ${body || '(vacío)'}`);
+      this.logger.error(`    url     : ${downloadUrl.slice(0, 200)}`);
       throw new Error(`Descarga del archivo falló con status ${status} (${tienda.nombre})`);
     }
 
