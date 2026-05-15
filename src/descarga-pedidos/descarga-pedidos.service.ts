@@ -177,8 +177,10 @@ export class DescargaPedidosService implements OnModuleInit {
       const headers  = JSON.stringify(httpErr?.response?.headers ?? {}).slice(0, 500);
       const rawBody  = httpErr?.response?.data;
       let   body     = '';
-      if (rawBody instanceof ArrayBuffer || Buffer.isBuffer(rawBody)) {
-        body = Buffer.from(rawBody).toString('utf8').slice(0, 500);
+      if (rawBody instanceof ArrayBuffer) {
+        body = Buffer.from(new Uint8Array(rawBody)).toString('utf8').slice(0, 500);
+      } else if (Buffer.isBuffer(rawBody)) {
+        body = (rawBody as Buffer).toString('utf8').slice(0, 500);
       } else if (typeof rawBody === 'string') {
         body = rawBody.slice(0, 500);
       } else if (rawBody) {
