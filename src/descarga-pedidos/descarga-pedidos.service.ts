@@ -119,7 +119,7 @@ export class DescargaPedidosService implements OnModuleInit {
     this.logger.log(`  · [${tienda.nombre}] JWT obtenido (${jwt.length} chars)`);
 
     const hoy = this.isoFecha(new Date());
-    const startAt = this.configService.get<string>('descargaPedidos.startAt', '2025-11-01');
+    const startAt = this.configService.get<string>('descargaPedidos.startAt', '2026-03-01');
     this.logger.log(`  · [${tienda.nombre}] Llamando API export: ${startAt} → ${hoy}`);
 
     let exportRes: any;

@@ -12,5 +12,5 @@ export default registerAs('descargaPedidos', () => ({
     driveFolderId: process.env.VENNDELO_BOGOTA_DRIVE_FOLDER_ID,
   },
   consolidadoFileId: process.env.CONSOLIDADO_FILE_ID,
-  startAt: '2025-11-01',
+  startAt: '2026-03-01',
 }));
