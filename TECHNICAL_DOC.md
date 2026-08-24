@@ -260,6 +260,7 @@ Inicio
   │  → POST /shipping/generate-labels
   │       { output: 'URL', format: 'LABEL_10x15', order_ids: [...] }
   │  → Polling: cada 60s, máximo 30 intentos (30 minutos)
+  │  → Timeout por intento: 180s (3 minutos)
   │  → Espera status == 'SUCCESS' en la respuesta
   │  → Retorna URL de las etiquetas en PDF
   │  → Si timeout → lanza Error (proceso detenido)

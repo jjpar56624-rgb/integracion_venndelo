@@ -153,7 +153,7 @@ export class OperationsService {
       const labelsResult = await this.pollGenerateLabels(orderIds, storeConfig);
       labelUrl  = labelsResult.labelUrl;
       labelsRaw = labelsResult.labelsRaw;
-      steps.push({ number: '3', label: 'Etiquetas generadas', status: 'success', detail: 'URL obtenida' });
+      steps.push({ number: '3', label: 'Etiquetas generadas', status: 'success', detail: `URL obtenida (intento ${labelsResult.attempt}/${POLL_MAX_ATTEMPTS})` });
       this.logger.log(`[3/7] Labels URL: ${labelUrl}`);
 
       // ── Step 3b: Tracking numbers ────────────────────────────────────────
@@ -254,17 +254,17 @@ export class OperationsService {
   private async pollGenerateLabels(
     orderIds: string[],
     storeConfig: StoreConfig,
-  ): Promise<{ labelUrl: string; labelsRaw: LabelsResponse }> {
+  ): Promise<{ labelUrl: string; labelsRaw: LabelsResponse; attempt: number }> {
     for (let attempt = 1; attempt <= POLL_MAX_ATTEMPTS; attempt++) {
       const labelsRaw = await this.shippingService.generateLabels(
         { output: LabelOutput.URL, format: LabelFormat.LABEL_10x15, order_ids: orderIds },
-        90_000,
+        180_000,
         storeConfig,
       ) as LabelsResponse;
 
       if (labelsRaw?.status === 'SUCCESS' && labelsRaw?.data) {
         this.logger.log(`[3/7] Labels SUCCESS en intento ${attempt}`);
-        return { labelUrl: labelsRaw.data, labelsRaw };
+        return { labelUrl: labelsRaw.data, labelsRaw, attempt };
       }
 
       this.logger.log(
