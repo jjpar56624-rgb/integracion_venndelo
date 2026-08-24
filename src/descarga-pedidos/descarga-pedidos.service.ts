@@ -165,38 +165,58 @@ export class DescargaPedidosService implements OnModuleInit {
     }
 
     this.logger.log(`  · [${tienda.nombre}] URL de descarga obtenida: ${downloadUrl.slice(0, 120)}...`);
-    this.logger.log(`  · [${tienda.nombre}] Descargando archivo...`);
 
-    let fileRes: any;
-    try {
-      fileRes = await firstValueFrom(
-        this.httpService.get<ArrayBuffer>(downloadUrl, { responseType: 'arraybuffer' }),
-      );
-    } catch (httpErr: any) {
-      const status   = httpErr?.response?.status                                      ?? 'sin respuesta';
-      const headers  = JSON.stringify(httpErr?.response?.headers ?? {}).slice(0, 500);
-      const rawBody  = httpErr?.response?.data;
-      let   body     = '';
-      if (rawBody instanceof ArrayBuffer) {
-        body = Buffer.from(new Uint8Array(rawBody)).toString('utf8').slice(0, 500);
-      } else if (Buffer.isBuffer(rawBody)) {
-        body = (rawBody as Buffer).toString('utf8').slice(0, 500);
-      } else if (typeof rawBody === 'string') {
-        body = rawBody.slice(0, 500);
-      } else if (rawBody) {
-        body = JSON.stringify(rawBody).slice(0, 500);
+    // ── Descarga con reintentos ───────────────────────────────────────────────
+    const MAX_DOWNLOAD_ATTEMPTS = 3;
+    const DOWNLOAD_TIMEOUT_MS   = 300_000; // 5 minutos por intento
+    const DOWNLOAD_RETRY_DELAY  = 15_000;  // 15 s entre reintentos
+
+    let lastDownloadError: Error | null = null;
+
+    for (let attempt = 1; attempt <= MAX_DOWNLOAD_ATTEMPTS; attempt++) {
+      this.logger.log(`  · [${tienda.nombre}] Descargando archivo (intento ${attempt}/${MAX_DOWNLOAD_ATTEMPTS})...`);
+      try {
+        const fileRes = await firstValueFrom(
+          this.httpService.get<ArrayBuffer>(downloadUrl, {
+            responseType: 'arraybuffer',
+            timeout: DOWNLOAD_TIMEOUT_MS,
+          }),
+        );
+        const bytes = (fileRes.data as ArrayBuffer)?.byteLength ?? 0;
+        this.logger.log(`  · [${tienda.nombre}] Archivo descargado: ${(bytes / 1024).toFixed(1)} KB`);
+        return Buffer.from(fileRes.data);
+
+      } catch (httpErr: any) {
+        const status  = httpErr?.response?.status ?? 'sin respuesta';
+        const code    = httpErr?.code ?? '';
+        const message = httpErr?.message ?? '';
+        const rawBody = httpErr?.response?.data;
+        let body = '';
+        if (rawBody instanceof ArrayBuffer) {
+          body = Buffer.from(new Uint8Array(rawBody)).toString('utf8').slice(0, 500);
+        } else if (Buffer.isBuffer(rawBody)) {
+          body = (rawBody as Buffer).toString('utf8').slice(0, 500);
+        } else if (typeof rawBody === 'string') {
+          body = rawBody.slice(0, 500);
+        } else if (rawBody) {
+          body = JSON.stringify(rawBody).slice(0, 500);
+        }
+
+        this.logger.error(`  · [${tienda.nombre}] Error en intento ${attempt}: status=${status} code=${code} message=${message}`);
+        if (body) this.logger.error(`    body: ${body}`);
+
+        lastDownloadError = new Error(
+          `Descarga del archivo falló (intento ${attempt}/${MAX_DOWNLOAD_ATTEMPTS}) — status=${status} code=${code} (${tienda.nombre})`,
+        );
+
+        if (attempt < MAX_DOWNLOAD_ATTEMPTS) {
+          this.logger.log(`  · [${tienda.nombre}] Reintentando en ${DOWNLOAD_RETRY_DELAY / 1000}s...`);
+          await new Promise((r) => setTimeout(r, DOWNLOAD_RETRY_DELAY));
+        }
       }
-      this.logger.error(`  · [${tienda.nombre}] Error descargando archivo`);
-      this.logger.error(`    status  : ${status}`);
-      this.logger.error(`    headers : ${headers}`);
-      this.logger.error(`    body    : ${body || '(vacío)'}`);
-      this.logger.error(`    url     : ${downloadUrl.slice(0, 200)}`);
-      throw new Error(`Descarga del archivo falló con status ${status} (${tienda.nombre})`);
     }
 
-    const bytes = (fileRes.data as ArrayBuffer)?.byteLength ?? 0;
-    this.logger.log(`  · [${tienda.nombre}] Archivo descargado: ${(bytes / 1024).toFixed(1)} KB`);
-    return Buffer.from(fileRes.data);
+    throw lastDownloadError ?? new Error(`Descarga fallida tras ${MAX_DOWNLOAD_ATTEMPTS} intentos (${tienda.nombre})`);
   }
 
   private async obtenerJWT(email: string, password: string): Promise<string> {
