@@ -113,7 +113,27 @@ export class DescargaPedidosService implements OnModuleInit {
 
   private async descargarPedidos(tienda: TiendaConfig): Promise<Buffer> {
     this.logger.log(`  · [${tienda.nombre}] Iniciando login con ${tienda.webEmail}`);
-    const jwt = await this.obtenerJWT(tienda.webEmail, tienda.webPassword);
+
+    const MAX_LOGIN_ATTEMPTS = 3;
+    const LOGIN_RETRY_DELAY  = 10_000; // 10 s entre reintentos
+
+    let jwt = '';
+    for (let attempt = 1; attempt <= MAX_LOGIN_ATTEMPTS; attempt++) {
+      try {
+        this.logger.log(`  · [${tienda.nombre}] Login intento ${attempt}/${MAX_LOGIN_ATTEMPTS}`);
+        jwt = await this.obtenerJWT(tienda.webEmail, tienda.webPassword);
+        if (jwt) break;
+        throw new Error('Token vacío en localStorage');
+      } catch (err: any) {
+        this.logger.error(`  · [${tienda.nombre}] Login intento ${attempt} falló: ${err.message}`);
+        if (attempt < MAX_LOGIN_ATTEMPTS) {
+          this.logger.log(`  · [${tienda.nombre}] Reintentando login en ${LOGIN_RETRY_DELAY / 1000}s...`);
+          await new Promise((r) => setTimeout(r, LOGIN_RETRY_DELAY));
+        } else {
+          throw new Error(`Login fallido tras ${MAX_LOGIN_ATTEMPTS} intentos (${tienda.nombre}): ${err.message}`);
+        }
+      }
+    }
 
     if (!jwt) throw new Error(`JWT vacío para ${tienda.nombre} — login fallido`);
     this.logger.log(`  · [${tienda.nombre}] JWT obtenido (${jwt.length} chars)`);
