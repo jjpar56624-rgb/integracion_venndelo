@@ -122,33 +122,53 @@ export class DescargaPedidosService implements OnModuleInit {
     const startAt = this.configService.get<string>('descargaPedidos.startAt', '2026-03-01');
     this.logger.log(`  · [${tienda.nombre}] Llamando API export: ${startAt} → ${hoy}`);
 
+    const MAX_EXPORT_ATTEMPTS = 3;
+    const EXPORT_TIMEOUT_MS   = 120_000; // 2 minutos por intento
+    const EXPORT_RETRY_DELAY  = 10_000;  // 10 s entre reintentos
+
     let exportRes: any;
-    try {
-      exportRes = await firstValueFrom(
-        this.httpService.post(
-          'https://app.venndelo.com/v2/admin/rpc',
-          {
-            jsonrpc: '2.0',
-            id: -1,
-            method: 'Admin_Order_Export.export',
-            params: { start_at: startAt, end_at: hoy },
-          },
-          {
-            params: { s: 'default', m: 'Admin_Order_Export.export' },
-            headers: {
-              'x-venndelo-admin-token': jwt,
-              'Content-Type': 'application/json;charset=UTF-8',
-              Accept: 'application/json, text/plain, */*',
+    let lastExportError: Error | null = null;
+
+    for (let attempt = 1; attempt <= MAX_EXPORT_ATTEMPTS; attempt++) {
+      try {
+        this.logger.log(`  · [${tienda.nombre}] API export (intento ${attempt}/${MAX_EXPORT_ATTEMPTS})`);
+        exportRes = await firstValueFrom(
+          this.httpService.post(
+            'https://app.venndelo.com/v2/admin/rpc',
+            {
+              jsonrpc: '2.0',
+              id: -1,
+              method: 'Admin_Order_Export.export',
+              params: { start_at: startAt, end_at: hoy },
             },
-          },
-        ),
-      );
-    } catch (httpErr: any) {
-      const status = httpErr?.response?.status ?? 'sin respuesta';
-      const body = JSON.stringify(httpErr?.response?.data ?? {}).slice(0, 300);
-      this.logger.error(`  · [${tienda.nombre}] HTTP error en export: status=${status} body=${body}`);
-      throw new Error(`API export falló con status ${status} (${tienda.nombre})`);
+            {
+              timeout: EXPORT_TIMEOUT_MS,
+              params: { s: 'default', m: 'Admin_Order_Export.export' },
+              headers: {
+                'x-venndelo-admin-token': jwt,
+                'Content-Type': 'application/json;charset=UTF-8',
+                Accept: 'application/json, text/plain, */*',
+              },
+            },
+          ),
+        );
+        lastExportError = null;
+        break; // éxito
+      } catch (httpErr: any) {
+        const status  = httpErr?.response?.status ?? 'sin respuesta';
+        const code    = httpErr?.code ?? '';
+        const message = httpErr?.message ?? '';
+        const body    = JSON.stringify(httpErr?.response?.data ?? {}).slice(0, 300);
+        this.logger.error(`  · [${tienda.nombre}] Error export intento ${attempt}: status=${status} code=${code} message=${message} body=${body}`);
+        lastExportError = new Error(`API export falló con status ${status} code=${code} (${tienda.nombre})`);
+        if (attempt < MAX_EXPORT_ATTEMPTS) {
+          this.logger.log(`  · [${tienda.nombre}] Reintentando export en ${EXPORT_RETRY_DELAY / 1000}s...`);
+          await new Promise((r) => setTimeout(r, EXPORT_RETRY_DELAY));
+        }
+      }
     }
+
+    if (lastExportError) throw lastExportError;
 
     this.logger.log(`  · [${tienda.nombre}] Respuesta export HTTP 200 — analizando resultado`);
 
@@ -228,7 +248,10 @@ export class DescargaPedidosService implements OnModuleInit {
     const page = await browser.newPage();
     try {
       this.logger.log(`  · [Login] Navegando a login`);
-      await page.goto('https://app.venndelo.com/web/#/login', { waitUntil: 'networkidle' });
+      await page.goto('https://app.venndelo.com/web/#/login', {
+        waitUntil: 'load',
+        timeout: 60_000,
+      });
       this.logger.log(`  · [Login] Página cargada — llenando credenciales`);
       await page.fill('input[placeholder="Correo Electrónico"]', email);
       await page.fill('input[type="password"]', password);
@@ -237,9 +260,9 @@ export class DescargaPedidosService implements OnModuleInit {
       this.logger.log(`  · [Login] Esperando redirección post-login`);
       await page.waitForFunction(
         () => !window.location.hash.includes('/login'),
-        { timeout: 30000 },
+        { timeout: 60_000 },
       );
-      await page.waitForLoadState('networkidle');
+      await page.waitForLoadState('load', { timeout: 30_000 });
       this.logger.log(`  · [Login] Redireccionado — extrayendo token de localStorage`);
       const raw: string | null = await page.evaluate(() => localStorage.getItem('token'));
       const token = raw ? (JSON.parse(raw) as string) : '';
