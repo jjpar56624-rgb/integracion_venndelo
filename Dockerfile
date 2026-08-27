@@ -22,19 +22,20 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 WORKDIR /app
 
-# Install Playwright Chromium + its system dependencies
-RUN npx -y playwright install --with-deps chromium \
-    && rm -rf /var/lib/apt/lists/*
-
 # Create non-root user
 RUN groupadd -g 1001 nodejs && useradd -u 1001 -g nodejs nestjs
 
-# Ensure playwright browser dir is accessible by non-root user
-RUN chmod -R 755 /ms-playwright
-
+# Copy node_modules primero para usar la versión exacta de Playwright del proyecto
 COPY --from=builder --chown=nestjs:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=nestjs:nodejs /app/dist ./dist
 COPY --chown=nestjs:nodejs package.json ./
+
+# Instalar browsers con la versión de Playwright que está en node_modules
+RUN node_modules/.bin/playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
+
+# Asegurar que el directorio de browsers sea accesible
+RUN chmod -R 755 /ms-playwright
 
 USER nestjs
 
